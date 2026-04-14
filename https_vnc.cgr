@@ -33,153 +33,166 @@ set backup_dir = "/var/backups/https-vnc"
 
 target "local" local:
 
-  [update apt cache] as root, timeout 5m:
-    when "action == 'install'"
-    always run $ apt update
+  # ─── Install ────────────────────────────────────────────────────────────────
 
-  [install packages] as root, timeout 10m:
-    when "action == 'install'"
-    first [update apt cache]
-    skip if $ dpkg -s novnc websockify nginx apache2-utils >/dev/null 2>&1
-    run    $ apt install -y novnc websockify nginx apache2-utils
+  phase "install" when "action == 'install'":
 
-  [enable RealVNC] as root, if fails ignore:
-    when "action == 'install'"
-    first [install packages]
-    always run $ raspi-config nonint do_vnc 0
+    [update apt cache] as root, timeout 5m:
+      always run $ apt update
 
-  [configure wayvnc] as root, if fails ignore:
-    when "action == 'install'"
-    first [enable RealVNC]
-    skip if $ test ! -f /etc/wayvnc/config || (grep -q '^enable_auth=false' /etc/wayvnc/config && grep -q '^enable_pam=false' /etc/wayvnc/config)
-    run    $ mkdir -p ${backup_dir} && cp /etc/wayvnc/config ${backup_dir}/config.bak 2>/dev/null || true; sed -i 's/enable_auth=true/enable_auth=false/' /etc/wayvnc/config; sed -i 's/enable_pam=true/enable_pam=false/' /etc/wayvnc/config; systemctl restart wayvnc || true
+    [install packages] as root, timeout 10m:
+      first [update apt cache]
+      skip if $ dpkg -s novnc websockify nginx apache2-utils >/dev/null 2>&1
+      run    $ apt install -y novnc websockify nginx apache2-utils
 
-  [backup existing config] as root:
-    when "action == 'install'"
-    first [configure wayvnc]
-    always run $ mkdir -p ${backup_dir}; for f in ${novnc_service} ${nginx_site} /etc/nginx/sites-enabled/default; do if test -f "$f"; then cp "$f" "${backup_dir}/$(basename "$f").bak" || true; fi; done
+    [enable RealVNC] as root, if fails ignore:
+      first [install packages]
+      always run $ raspi-config nonint do_vnc 0
 
-  [write novnc service] as root:
-    when "action == 'install'"
-    first [backup existing config]
-    content > ${novnc_service}:
-      [Unit]
-      Description=noVNC Web VNC
-      After=network.target
-      
-      [Service]
-      ExecStart=/usr/bin/websockify --web /usr/share/novnc/ 127.0.0.1:${novnc_port} localhost:${vnc_port}
-      Restart=always
-      User=${user_name}
-      
-      [Install]
-      WantedBy=multi-user.target
+    [configure wayvnc] as root, if fails ignore:
+      first [enable RealVNC]
+      skip if:
+        test ! -f /etc/wayvnc/config
+        grep -q '^enable_auth=false' /etc/wayvnc/config
+        grep -q '^enable_pam=false' /etc/wayvnc/config
+      run:
+        mkdir -p ${backup_dir}
+        cp /etc/wayvnc/config ${backup_dir}/config.bak 2>/dev/null || true
+        sed -i 's/enable_auth=true/enable_auth=false/' /etc/wayvnc/config
+        sed -i 's/enable_pam=true/enable_pam=false/' /etc/wayvnc/config
+        systemctl restart wayvnc || true
 
-  [start novnc service] as root:
-    when "action == 'install'"
-    first [write novnc service]
-    skip if $ systemctl is-active novnc 2>/dev/null | grep -q active
-    run    $ systemctl daemon-reload && systemctl enable novnc && systemctl restart novnc
+    [backup existing config] as root:
+      first [configure wayvnc]
+      always run:
+        mkdir -p ${backup_dir}
+        for f in ${novnc_service} ${nginx_site} /etc/nginx/sites-enabled/default; do if test -f "$f"; then cp "$f" "${backup_dir}/$(basename "$f").bak" || true; fi; done
 
-  [create certificate directory] as root:
-    when "action == 'install'"
-    first [install packages]
-    skip if $ test -d ${nginx_cert_dir}
-    run    $ mkdir -p ${nginx_cert_dir}
+    [write novnc service] as root:
+      first [backup existing config]
+      content > ${novnc_service}:
+        [Unit]
+        Description=noVNC Web VNC
+        After=network.target
 
-  [create HTTPS certificate] as root:
-    when "action == 'install'"
-    first [create certificate directory]
-    skip if $ test -s ${nginx_cert_dir}/vnc.key && test -s ${nginx_cert_dir}/vnc.crt
-    run    $ openssl req -x509 -nodes -days 365 -newkey rsa:2048 -keyout ${nginx_cert_dir}/vnc.key -out ${nginx_cert_dir}/vnc.crt -subj "/CN=$(hostname).local" && chmod 600 ${nginx_cert_dir}/vnc.key
+        [Service]
+        ExecStart=/usr/bin/websockify --web /usr/share/novnc/ 127.0.0.1:${novnc_port} localhost:${vnc_port}
+        Restart=always
+        User=${user_name}
 
-  [create HTTPS login] as root, timeout 10m reset on output:
-    when "action == 'install'"
-    first [install packages]
-    skip if $ test -s ${nginx_auth_file}
-    run    $ printf '\nCreate HTTPS login credentials\n'; read -rp 'Username: ' VNC_USER < /dev/tty; while true; do read -rsp 'Password: ' VNC_PASS < /dev/tty; printf '\n'; read -rsp 'Confirm: ' CONFIRM < /dev/tty; printf '\n'; test "$VNC_PASS" = "$CONFIRM" && break; printf 'Passwords do not match. Try again.\n'; done; htpasswd -cb ${nginx_auth_file} "$VNC_USER" "$VNC_PASS"; chown root:www-data ${nginx_auth_file}; chmod 640 ${nginx_auth_file}
+        [Install]
+        WantedBy=multi-user.target
 
-  [write nginx site] as root:
-    when "action == 'install'"
-    first [create HTTPS certificate], [create HTTPS login]
-    content > ${nginx_site}:
-      server {
-          listen 443 ssl;
-          server_name _;
-      
-          ssl_certificate ${nginx_cert_dir}/vnc.crt;
-          ssl_certificate_key ${nginx_cert_dir}/vnc.key;
-      
-          auth_basic "Secure VNC";
-          auth_basic_user_file ${nginx_auth_file};
-      
-          location = / {
-              return 301 /vnc.html;
-          }
-      
-          location / {
-              proxy_pass http://127.0.0.1:${novnc_port}/;
-              proxy_http_version 1.1;
-              proxy_set_header Upgrade $http_upgrade;
-              proxy_set_header Connection "upgrade";
-              proxy_set_header Host $host;
-          }
-      }
-    validate $ nginx -t
+    [start novnc service] as root:
+      first [write novnc service]
+      skip if $ systemctl is-active novnc 2>/dev/null | grep -q active
+      run:
+        systemctl daemon-reload
+        systemctl enable novnc
+        systemctl restart novnc
 
-  [enable nginx site] as root:
-    when "action == 'install'"
-    first [write nginx site]
-    skip if $ test -L ${nginx_site_link} && test "$(readlink ${nginx_site_link})" = "${nginx_site}" && test ! -e /etc/nginx/sites-enabled/default
-    run    $ ln -sf ${nginx_site} ${nginx_site_link} && rm -f /etc/nginx/sites-enabled/default
+    [create certificate directory] as root:
+      first [install packages]
+      skip if $ test -d ${nginx_cert_dir}
+      run    $ mkdir -p ${nginx_cert_dir}
 
-  [restart nginx after install] as root:
-    when "action == 'install'"
-    first [enable nginx site], [start novnc service]
-    always run $ nginx -t && systemctl restart nginx
+    [create HTTPS certificate] as root:
+      first [create certificate directory]
+      skip if:
+        test -s ${nginx_cert_dir}/vnc.key
+        test -s ${nginx_cert_dir}/vnc.crt
+      run:
+        openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+          -keyout ${nginx_cert_dir}/vnc.key \
+          -out ${nginx_cert_dir}/vnc.crt \
+          -subj "/CN=$(hostname).local"
+        chmod 600 ${nginx_cert_dir}/vnc.key
 
-  [verify HTTPS VNC services] if fails warn:
-    when "action == 'install'"
-    first [restart nginx after install]
-    run   $ systemctl is-active nginx | grep -q active && systemctl is-active novnc | grep -q active
-    retry 3x wait 2s
+    # Note: [create HTTPS login] runs an interactive credential prompt (stty/read loop).
+    # If this becomes unwieldy, consider: script ./scripts/create_vnc_login.sh
+    [create HTTPS login] as root, timeout 10m reset on output:
+      first [install packages]
+      skip if $ test -s ${nginx_auth_file}
+      run    $ printf '\nCreate HTTPS login credentials\n'; printf 'Username: '; IFS= read -r VNC_USER < /dev/tty; while true; do printf 'Password: '; stty -echo < /dev/tty; IFS= read -r VNC_PASS < /dev/tty; stty echo < /dev/tty; printf '\n'; printf 'Confirm: '; stty -echo < /dev/tty; IFS= read -r CONFIRM < /dev/tty; stty echo < /dev/tty; printf '\n'; test "$VNC_PASS" = "$CONFIRM" && break; printf 'Passwords do not match. Try again.\n'; done; htpasswd -cb ${nginx_auth_file} "$VNC_USER" "$VNC_PASS"; chown root:www-data ${nginx_auth_file}; chmod 640 ${nginx_auth_file}
 
-  [show access URL]:
-    when "action == 'install'"
-    first [restart nginx after install]
-    always run $ IP=$(hostname -I | awk '{print $1}'); printf '\nAccess your Pi at:\n  https://%s/\n\nLogin with the HTTPS credentials you created.\nThe VNC desktop should connect automatically.\n\nSelf-signed certificate warning is expected.\n' "$IP"
+    [write nginx site] as root:
+      first [create HTTPS certificate], [create HTTPS login]
+      content > ${nginx_site}:
+        server {
+            listen 443 ssl;
+            server_name _;
 
-  [stop novnc] as root, if fails ignore:
-    when "action == 'rollback'"
-    always run $ systemctl stop novnc
+            ssl_certificate ${nginx_cert_dir}/vnc.crt;
+            ssl_certificate_key ${nginx_cert_dir}/vnc.key;
 
-  [disable novnc] as root, if fails ignore:
-    when "action == 'rollback'"
-    first [stop novnc]
-    always run $ systemctl disable novnc
+            auth_basic "Secure VNC";
+            auth_basic_user_file ${nginx_auth_file};
 
-  [remove HTTPS VNC files] as root:
-    when "action == 'rollback'"
-    first [disable novnc]
-    always run $ rm -f ${novnc_service} ${nginx_site_link} ${nginx_site} ${nginx_auth_file}; rm -rf ${nginx_cert_dir}
+            location = / {
+                return 301 /vnc.html;
+            }
 
-  [restore default nginx site] as root:
-    when "action == 'rollback'"
-    first [remove HTTPS VNC files]
-    skip if $ test ! -f ${backup_dir}/default.bak
-    run    $ cp ${backup_dir}/default.bak /etc/nginx/sites-enabled/default
+            location / {
+                proxy_pass http://127.0.0.1:${novnc_port}/;
+                proxy_http_version 1.1;
+                proxy_set_header Upgrade $http_upgrade;
+                proxy_set_header Connection "upgrade";
+                proxy_set_header Host $host;
+            }
+        }
+      validate $ nginx -t
 
-  [reload systemd] as root:
-    when "action == 'rollback'"
-    first [remove HTTPS VNC files]
-    always run $ systemctl daemon-reload
+    [enable nginx site] as root:
+      first [write nginx site]
+      skip if:
+        test -L ${nginx_site_link}
+        test "$(readlink ${nginx_site_link})" = "${nginx_site}"
+        test ! -e /etc/nginx/sites-enabled/default
+      run:
+        ln -sf ${nginx_site} ${nginx_site_link}
+        rm -f /etc/nginx/sites-enabled/default
 
-  [restart nginx after rollback] as root, if fails ignore:
-    when "action == 'rollback'"
-    first [restore default nginx site], [reload systemd]
-    always run $ systemctl restart nginx
+    [restart nginx after install] as root:
+      first [enable nginx site], [start novnc service]
+      always run $ nginx -t && systemctl restart nginx
 
-  [rollback complete]:
-    when "action == 'rollback'"
-    first [restart nginx after rollback]
-    always run $ printf 'Rollback complete.\nHTTPS VNC has been removed.\n'
+    [verify HTTPS VNC services] if fails warn:
+      first [restart nginx after install]
+      run   $ systemctl is-active nginx | grep -q active && systemctl is-active novnc | grep -q active
+      retry 3x wait 2s
+
+    [show access URL]:
+      first [restart nginx after install]
+      always run $ IP=$(hostname -I | awk '{print $1}'); printf '\nAccess your Pi at:\n  https://%s/\n\nLogin with the HTTPS credentials you created.\nThe VNC desktop should connect automatically.\n\nSelf-signed certificate warning is expected.\n' "$IP"
+
+  # ─── Rollback ───────────────────────────────────────────────────────────────
+
+  phase "rollback" when "action == 'rollback'":
+
+    [stop novnc] as root, if fails ignore:
+      always run $ systemctl stop novnc
+
+    [disable novnc] as root, if fails ignore:
+      first [stop novnc]
+      always run $ systemctl disable novnc
+
+    [remove HTTPS VNC files] as root:
+      first [disable novnc]
+      always run $ rm -f ${novnc_service} ${nginx_site_link} ${nginx_site} ${nginx_auth_file}; rm -rf ${nginx_cert_dir}
+
+    [restore default nginx site] as root:
+      first [remove HTTPS VNC files]
+      skip if $ test ! -f ${backup_dir}/default.bak
+      run    $ cp ${backup_dir}/default.bak /etc/nginx/sites-enabled/default
+
+    [reload systemd] as root:
+      first [remove HTTPS VNC files]
+      always run $ systemctl daemon-reload
+
+    [restart nginx after rollback] as root, if fails ignore:
+      first [restore default nginx site], [reload systemd]
+      always run $ systemctl restart nginx
+
+    [rollback complete]:
+      first [restart nginx after rollback]
+      always run $ printf 'Rollback complete.\nHTTPS VNC has been removed.\n'

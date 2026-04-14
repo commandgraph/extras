@@ -56,34 +56,38 @@ target "master" ssh ${ssh_user}@${master_host}:
   [disable longhorn scheduling]:
     first  [cordon node]
     # Stop Longhorn from placing new replicas on this node
-    run    $ kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
-               --type=merge -p '{"spec":{"allowScheduling":false}}'
+    run:
+      kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
+        --type=merge -p '{"spec":{"allowScheduling":false}}'
     timeout 30s
 
   [request longhorn evacuation]:
     first  [disable longhorn scheduling]
     # Tell Longhorn to proactively move existing replicas off the node
-    run    $ kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
-               --type=merge -p '{"spec":{"evictionRequested":true}}'
+    run:
+      kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
+        --type=merge -p '{"spec":{"evictionRequested":true}}'
     timeout 30s
 
   [wait for longhorn replicas evacuated]:
     first  [request longhorn evacuation]
     # Poll until no replicas remain scheduled on this node (max ~10 min)
-    run    $ kubectl -n ${longhorn_ns} get replica.longhorn.io \
-               -o jsonpath="{range .items[?(@.spec.nodeID==\"${node}\")]}{.metadata.name}{\"\\n\"}{end}" \
-               | grep -c . || true
+    run:
+      kubectl -n ${longhorn_ns} get replica.longhorn.io \
+        -o jsonpath="{range .items[?(@.spec.nodeID==\"${node}\")]}{.metadata.name}{\"\\n\"}{end}" \
+        | grep -c . || true
     until  "0"
     retry  60x wait 10s
     timeout 620s
 
   [drain k8s workloads]:
     first  [wait for longhorn replicas evacuated]
-    run    $ kubectl drain ${node} \
-               --ignore-daemonsets \
-               --delete-emptydir-data \
-               --force \
-               --timeout=300s
+    run:
+      kubectl drain ${node} \
+        --ignore-daemonsets \
+        --delete-emptydir-data \
+        --force \
+        --timeout=300s
     timeout 6m
 
   # ── Post-maintenance: wait for ready, uncordon, re-enable Longhorn ─────────
@@ -94,10 +98,11 @@ target "master" ssh ${ssh_user}@${master_host}:
     # First confirm the node goes NotReady (guards against re-running when node is already up).
     # Then wait for it to come back. The || true tolerates a fast reboot that rejoins
     # before we poll, or a re-run where the node is already Ready again.
-    run    $ echo "Waiting for ${node} to go offline..."; \
-             kubectl wait node/${node} --for=condition=Ready=False --timeout=120s || true; \
-             echo "Waiting for ${node} to come back online..."; \
-             kubectl wait node/${node} --for=condition=Ready=True --timeout=300s
+    run:
+      echo "Waiting for ${node} to go offline..."
+      kubectl wait node/${node} --for=condition=Ready=False --timeout=120s || true
+      echo "Waiting for ${node} to come back online..."
+      kubectl wait node/${node} --for=condition=Ready=True --timeout=300s
     timeout 430s
 
   [uncordon node]:
@@ -108,20 +113,21 @@ target "master" ssh ${ssh_user}@${master_host}:
 
   [re-enable longhorn scheduling]:
     first  [uncordon node]
-    run    $ kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
-               --type=merge -p '{"spec":{"allowScheduling":true,"evictionRequested":false}}'
+    run:
+      kubectl -n ${longhorn_ns} patch node.longhorn.io/${node} \
+        --type=merge -p '{"spec":{"allowScheduling":true,"evictionRequested":false}}'
     timeout 30s
 
   [wait for longhorn node healthy]:
     first  [re-enable longhorn scheduling]
-    run    $ kubectl -n ${longhorn_ns} wait node.longhorn.io/${node} \
-               --for=condition=Ready --timeout=120s
+    run:
+      kubectl -n ${longhorn_ns} wait node.longhorn.io/${node} \
+        --for=condition=Ready --timeout=120s
     timeout 130s
 
   verify "node is schedulable and Longhorn is healthy":
     first  [wait for longhorn node healthy]
-    run    $ kubectl get node ${node} && kubectl -n ${longhorn_ns} get node.longhorn.io/${node} \
-               -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' | grep -q True
+    run    $ kubectl get node ${node} && kubectl -n ${longhorn_ns} get node.longhorn.io/${node} -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' | grep -q True
     retry  3x wait 10s
 
 
@@ -129,16 +135,14 @@ target "master" ssh ${ssh_user}@${master_host}:
 
 target "worker" ssh ${ssh_user}@${node_host}:
 
-  [apt upgrade]:
+  [apt upgrade] as root, timeout 10m:
     first  [master/drain k8s workloads]
-    run    $ apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
-    as root
-    timeout 10m
+    run:
+      apt-get update -y
+      DEBIAN_FRONTEND=noninteractive apt-get upgrade -y
 
-  [reboot]:
+  [reboot] as root, timeout 15s:
     first  [apt upgrade]
     # Background the reboot so the SSH command exits cleanly before the connection drops.
     # Without nohup &, SSH returns 255 (connection lost) which cgr treats as failure.
-    run    $ nohup reboot > /dev/null 2>&1 & sleep 2
-    as root
-    timeout 15s
+    run $ nohup reboot > /dev/null 2>&1 & sleep 2

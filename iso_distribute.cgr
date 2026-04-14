@@ -61,19 +61,18 @@ target "staging" local:
     first  [create staging dir]
     description "Download ${iso_file} from upstream"
     skip if $ test -f ${staging_dir}/${iso_file}
-    run    $ wget -c "${iso_url}" \
-               -O "${staging_dir}/${iso_file}.part" \
-               --progress=dot:giga && \
-             mv "${staging_dir}/${iso_file}.part" "${staging_dir}/${iso_file}"
+    run:
+      wget -c "${iso_url}" -O "${staging_dir}/${iso_file}.part" --progress=dot:giga
+      mv "${staging_dir}/${iso_file}.part" "${staging_dir}/${iso_file}"
     retry  3x backoff 1m..10m jitter 15%
     timeout 1h
 
   [compute checksum]:
     first  [download iso]
     skip if $ test -f ${staging_dir}/${iso_file}.sha256
-    run    $ sha256sum "${staging_dir}/${iso_file}" | awk '{print $1}' \
-               > "${staging_dir}/${iso_file}.sha256" && \
-             cat "${staging_dir}/${iso_file}.sha256"
+    run:
+      sha256sum "${staging_dir}/${iso_file}" | awk '{print $1}' > "${staging_dir}/${iso_file}.sha256"
+      cat "${staging_dir}/${iso_file}.sha256"
     collect "sha256"
     timeout 5m
 
@@ -98,16 +97,10 @@ each host in ${hosts}:
 
     [verify ${host}]:
       first  [push iso to ${host}]
-      run    $ expected=$(cat "${dest_dir}/${iso_file}.sha256"); \
-               actual=$(sha256sum "${dest_dir}/${iso_file}" | awk '{print $1}'); \
-               if [ "$expected" = "$actual" ]; then \
-                 echo "${host}: OK  $actual"; \
-               else \
-                 echo "${host}: CHECKSUM MISMATCH"; \
-                 echo "  expected: $expected"; \
-                 echo "  actual:   $actual"; \
-                 exit 1; \
-               fi
+      run:
+        expected=$(cat "${dest_dir}/${iso_file}.sha256")
+        actual=$(sha256sum "${dest_dir}/${iso_file}" | awk '{print $1}')
+        if [ "$expected" = "$actual" ]; then echo "${host}: OK  $actual"; else printf '%s: CHECKSUM MISMATCH\n  expected: %s\n  actual:   %s\n' "${host}" "$expected" "$actual"; exit 1; fi
       collect "host_result"
       timeout 5m
 
