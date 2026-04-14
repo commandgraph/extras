@@ -16,16 +16,7 @@ The root keeps the graphs that materially exercise CommandGraph behavior and are
 
 ## What lives here
 
-These files are kept here as reference material for separate publishing or migration work:
-
-- `hello.cgr`
-- `install_claude_code.cgr`
-- `install_codex.cgr`
-- `run_python_tests.cgr`
-- `authorize_ssh_key.cgr`
-- `revoke_ssh_key.cgr`
-- `iso_distribute.cgr`
-- `k3s_worker_upgrade_cycle.cgr`
+The `.cgr` files in this directory are kept as reference material for separate publishing or migration work. Treat the directory contents as the source of truth for which reference graphs are currently available here.
 
 ## Syntax authority
 
