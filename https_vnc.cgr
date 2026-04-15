@@ -1,4 +1,4 @@
---- HTTPS Browser VNC on Raspberry Pi ---
+--- HTTPS Browser VNC on Raspberry Pi OS ---
 
 # Usage:
 #   Validate syntax:
@@ -13,10 +13,13 @@
 #   Roll back HTTPS browser VNC:
 #     sudo cgr apply https_vnc.cgr --set action=rollback
 #
+#   Uninstall HTTPS browser VNC:
+#     sudo cgr apply https_vnc.cgr --set action=uninstall
+#
 # The default action is "install", so omitting --set action=install installs.
 #
 # This graph is stateless so a previous install run cannot cause rollback steps
-# to be skipped, and a previous rollback run cannot affect a later install.
+# to be skipped, and a previous rollback or uninstall run cannot affect a later install.
 set stateless = true
 set action = "install"
 
@@ -33,17 +36,25 @@ set backup_dir = "/var/backups/https-vnc"
 
 target "local" local:
 
+  [validate action]:
+    run:
+      case "${action}" in \
+        install|rollback|uninstall) exit 0 ;; \
+        *) printf 'Invalid action: %s\nUse install, rollback, or uninstall.\n' "${action}"; exit 1 ;; \
+      esac
+
   # ─── Install ────────────────────────────────────────────────────────────────
 
   phase "install" when "action == 'install'":
 
     [update apt cache] as root, timeout 5m:
+      first [validate action]
       always run $ apt update
 
     [install packages] as root, timeout 10m:
       first [update apt cache]
-      skip if $ dpkg -s novnc websockify nginx apache2-utils >/dev/null 2>&1
-      run    $ apt install -y novnc websockify nginx apache2-utils
+      skip if $ dpkg -s novnc websockify nginx apache2-utils curl >/dev/null 2>&1
+      run    $ apt install -y novnc websockify nginx apache2-utils curl
 
     [enable RealVNC] as root, if fails ignore:
       first [install packages]
@@ -62,8 +73,14 @@ target "local" local:
         sed -i 's/enable_pam=true/enable_pam=false/' /etc/wayvnc/config
         systemctl restart wayvnc || true
 
-    [backup existing config] as root:
+    [verify VNC backend]:
       first [configure wayvnc]
+      run:
+        ss -ltn | grep -q ":${vnc_port} "
+      retry 6x wait 5s
+
+    [backup existing config] as root:
+      first [verify VNC backend]
       always run:
         mkdir -p ${backup_dir}
         for f in ${novnc_service} ${nginx_site} /etc/nginx/sites-enabled/default; do if test -f "$f"; then cp "$f" "${backup_dir}/$(basename "$f").bak" || true; fi; done
@@ -85,8 +102,7 @@ target "local" local:
 
     [start novnc service] as root:
       first [write novnc service]
-      skip if $ systemctl is-active novnc 2>/dev/null | grep -q active
-      run:
+      always run:
         systemctl daemon-reload
         systemctl enable novnc
         systemctl restart novnc
@@ -108,11 +124,12 @@ target "local" local:
           -subj "/CN=$(hostname).local"
         chmod 600 ${nginx_cert_dir}/vnc.key
 
-    # Note: [create HTTPS login] runs an interactive credential prompt (stty/read loop).
-    # If this becomes unwieldy, consider: script ./scripts/create_vnc_login.sh
+    # Note: [create HTTPS login] owns the terminal. Keep it after the service setup
+    # path so live progress from parallel steps cannot repaint over its prompt.
     [create HTTPS login] as root, timeout 10m reset on output:
-      first [install packages]
+      first [install packages], [start novnc service]
       skip if $ test -s ${nginx_auth_file}
+      interactive
       run    $ printf '\nCreate HTTPS login credentials\n'; printf 'Username: '; IFS= read -r VNC_USER < /dev/tty; while true; do printf 'Password: '; stty -echo < /dev/tty; IFS= read -r VNC_PASS < /dev/tty; stty echo < /dev/tty; printf '\n'; printf 'Confirm: '; stty -echo < /dev/tty; IFS= read -r CONFIRM < /dev/tty; stty echo < /dev/tty; printf '\n'; test "$VNC_PASS" = "$CONFIRM" && break; printf 'Passwords do not match. Try again.\n'; done; htpasswd -cb ${nginx_auth_file} "$VNC_USER" "$VNC_PASS"; chown root:www-data ${nginx_auth_file}; chmod 640 ${nginx_auth_file}
 
     [write nginx site] as root:
@@ -156,20 +173,25 @@ target "local" local:
       first [enable nginx site], [start novnc service]
       always run $ nginx -t && systemctl restart nginx
 
-    [verify HTTPS VNC services] if fails warn:
+    [verify HTTPS VNC services]:
       first [restart nginx after install]
-      run   $ systemctl is-active nginx | grep -q active && systemctl is-active novnc | grep -q active
+      run:
+        systemctl is-active nginx | grep -q active
+        systemctl is-active novnc | grep -q active
+        ss -ltn | grep -q ":${vnc_port} "
+        curl -fsS http://127.0.0.1:${novnc_port}/vnc.html >/dev/null
       retry 3x wait 2s
 
     [show access URL]:
-      first [restart nginx after install]
+      first [verify HTTPS VNC services]
       always run $ IP=$(hostname -I | awk '{print $1}'); printf '\nAccess your Pi at:\n  https://%s/\n\nLogin with the HTTPS credentials you created.\nThe VNC desktop should connect automatically.\n\nSelf-signed certificate warning is expected.\n' "$IP"
 
-  # ─── Rollback ───────────────────────────────────────────────────────────────
+  # ─── Rollback / Uninstall ──────────────────────────────────────────────────
 
-  phase "rollback" when "action == 'rollback'":
+  phase "rollback" when "action != 'install'":
 
     [stop novnc] as root, if fails ignore:
+      first [validate action]
       always run $ systemctl stop novnc
 
     [disable novnc] as root, if fails ignore:
@@ -195,4 +217,4 @@ target "local" local:
 
     [rollback complete]:
       first [restart nginx after rollback]
-      always run $ printf 'Rollback complete.\nHTTPS VNC has been removed.\n'
+      always run $ printf '%s complete.\nHTTPS VNC has been removed.\n' "${action}"
