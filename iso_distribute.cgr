@@ -8,106 +8,100 @@
 #
 # Usage:
 #   cgr apply iso_distribute.cgr \
-#     --set iso_url="https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" \
-#     --set iso_file="ubuntu-24.04.iso" \
-#     --set hosts="host-1,host-2,host-3,host-4"
+#     --set iso_url="https://releases.ubuntu.com/24.04.2/ubuntu-24.04.2-live-server-amd64.iso" \
+#     --set iso_file="ubuntu-24.04.2-live-server-amd64.iso" \
+#     --set hosts="root@host-1,ubuntu@host-2,deploy@host-3"
 #
 #   Or with an Ansible-style inventory file:
 #   cgr apply iso_distribute.cgr -i fleet.ini \
-#     --set iso_url="https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso" \
-#     --set iso_file="ubuntu-24.04.iso"
+#     --set iso_url="https://releases.ubuntu.com/24.04.2/ubuntu-24.04.2-live-server-amd64.iso" \
+#     --set iso_file="ubuntu-24.04.2-live-server-amd64.iso"
 #
 #   Inventory file format (fleet.ini):
 #     [fleet]
 #     host-1  ansible_host=10.0.0.1  ansible_user=root
-#     host-2  ansible_host=10.0.0.2  ansible_user=root
-#     host-3  ansible_host=10.0.0.3  ansible_user=root
+#     host-2  ansible_host=10.0.0.2  ansible_user=ubuntu
+#     host-3  ansible_host=10.0.0.3  ansible_user=deploy
 #
 # Variables:
-#   iso_url          — full URL to the ISO (required)
-#   iso_file         — filename to save as locally and on remotes (required)
-#   staging_dir      — local directory for the download and compressed copy
-#   hosts            — comma-separated list of target hostnames/IPs
-#   dest_dir         — destination directory on each remote host
-#   ssh_user         — SSH user (key-based auth assumed; no password prompts)
+#   iso_url     — full URL to the ISO (required)
+#   iso_file    — filename to save as locally and on remotes (required)
+#   staging_dir — local directory for the download and compressed copy
+#   hosts       — comma-separated list of user@host targets (key-based auth assumed)
+#   dest_dir    — destination directory on each remote host
 #
 # Resuming individual steps manually:
-#   cgr state set iso_distribute.cgr "download iso"      redo   # force re-download
-#   cgr state show iso_distribute.cgr                           # inspect all state
+#   cgr state set iso_distribute.cgr "download iso"  redo   # force re-download
+#   cgr state show iso_distribute.cgr                       # inspect all state
 #
 # Notes:
 #   - wget -c resumes partial downloads.
 #   - Hosts can be specified inline via --set hosts=... or via -i inventory.ini
 
-set iso_url          = "https://releases.ubuntu.com/24.04/ubuntu-24.04-live-server-amd64.iso"
-set iso_file         = "ubuntu-24.04.iso"
-set staging_dir      = "/tmp/iso-staging"
-set hosts            = "host-1,host-2,host-3"
-set dest_dir         = "/opt/iso"
-set ssh_user         = "root"
+set iso_url     = "https://releases.ubuntu.com/24.04.2/ubuntu-24.04.2-live-server-amd64.iso"
+set iso_file    = "ubuntu-24.04.2-live-server-amd64.iso"
+set staging_dir = "/tmp/iso-staging"
+set hosts       = "root@host-1,root@host-2,root@host-3"
+set dest_dir    = "$HOME/iso"
 
 target "staging" local:
 
   [assert tools]:
-    description "Verify required tools are installed"
     assert $ which wget,      "wget is required (apt install wget)"
     assert $ which sha256sum, "sha256sum is required (coreutils)"
 
   [create staging dir]:
-    first  [assert tools]
-    run    $ mkdir -p ${staging_dir}
+    first [assert tools]
+    run $ mkdir -p ${staging_dir}
 
-  [download iso]:
-    first  [create staging dir]
+  [download iso] timeout 1h, retry 3x backoff 1m..10m jitter 15%:
+    first [create staging dir]
     description "Download ${iso_file} from upstream"
     skip if $ test -f ${staging_dir}/${iso_file}
     run:
       wget -c "${iso_url}" -O "${staging_dir}/${iso_file}.part" --progress=dot:giga
       mv "${staging_dir}/${iso_file}.part" "${staging_dir}/${iso_file}"
-    retry  3x backoff 1m..10m jitter 15%
-    timeout 1h
 
-  [compute checksum]:
-    first  [download iso]
+  [compute checksum] timeout 5m:
+    first [download iso]
     skip if $ test -f ${staging_dir}/${iso_file}.sha256
     run:
       sha256sum "${staging_dir}/${iso_file}" | awk '{print $1}' > "${staging_dir}/${iso_file}.sha256"
       cat "${staging_dir}/${iso_file}.sha256"
     collect "sha256"
-    timeout 5m
 
-each host in ${hosts}:
-  target "${host}" ssh ${ssh_user}@${host}, after "staging":
+each addr in ${hosts}:
+  target "${addr}" ssh ${addr}, after "staging":
 
-    [prepare ${host}]:
+    [prepare ${addr}] timeout 30s:
       skip if $ test -d ${dest_dir}
-      run    $ mkdir -p ${dest_dir}
-      timeout 30s
+      run $ mkdir -p ${dest_dir}
 
-    [copy checksum to ${host}]:
-      first  [prepare ${host}]
+    [copy checksum to ${addr}] timeout 30s:
+      first [prepare ${addr}]
       put ${staging_dir}/${iso_file}.sha256 > ${dest_dir}/${iso_file}.sha256
-      timeout 30s
 
-    [push iso to ${host}]:
-      first  [prepare ${host}], [copy checksum to ${host}]
+    [push iso to ${addr}] timeout 2h:
+      first [prepare ${addr}], [copy checksum to ${addr}]
       skip if $ test -f "${dest_dir}/${iso_file}"
       put ${staging_dir}/${iso_file} > ${dest_dir}/${iso_file}
-      timeout 2h
 
-    [verify ${host}]:
-      first  [push iso to ${host}]
+    [verify ${addr}] timeout 5m:
+      first [push iso to ${addr}]
       run:
         expected=$(cat "${dest_dir}/${iso_file}.sha256")
         actual=$(sha256sum "${dest_dir}/${iso_file}" | awk '{print $1}')
-        if [ "$expected" = "$actual" ]; then echo "${host}: OK  $actual"; else printf '%s: CHECKSUM MISMATCH\n  expected: %s\n  actual:   %s\n' "${host}" "$expected" "$actual"; exit 1; fi
+        [ "$expected" = "$actual" ] || {
+          printf '%s: CHECKSUM MISMATCH\n  expected: %s\n  actual:   %s\n' \
+            "${addr}" "$expected" "$actual"
+          exit 1
+        }
+        echo "${addr}: OK  $actual"
       collect "host_result"
-      timeout 5m
 
 target "summary" local, after each:
 
-  [fleet summary]:
+  [fleet summary] if fails warn:
     description "Collate per-host verification results"
     reduce "host_result"
     collect "fleet_summary"
-    if fails warn

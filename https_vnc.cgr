@@ -38,9 +38,9 @@ target "local" local:
 
   [validate action]:
     run:
-      case "${action}" in \
-        install|rollback|uninstall) exit 0 ;; \
-        *) printf 'Invalid action: %s\nUse install, rollback, or uninstall.\n' "${action}"; exit 1 ;; \
+      case "${action}" in
+        install|rollback|uninstall) exit 0 ;;
+        *) printf 'Invalid action: %s\nUse install, rollback, or uninstall.\n' "${action}"; exit 1 ;;
       esac
 
   # ─── Install ────────────────────────────────────────────────────────────────
@@ -83,7 +83,9 @@ target "local" local:
       first [verify VNC backend]
       always run:
         mkdir -p ${backup_dir}
-        for f in ${novnc_service} ${nginx_site} /etc/nginx/sites-enabled/default; do if test -f "$f"; then cp "$f" "${backup_dir}/$(basename "$f").bak" || true; fi; done
+        for f in ${novnc_service} ${nginx_site} /etc/nginx/sites-enabled/default; do
+          if test -f "$f"; then cp "$f" "${backup_dir}/$(basename "$f").bak" || true; fi
+        done
 
     [write novnc service] as root:
       first [backup existing config]
